@@ -1,0 +1,272 @@
+name: Autocheck
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+
+    env:
+      REFERENCE_REPO: intensive-front/lesson2
+      # STRICT=true  -> максимально строго (кроме CRLF и BOM)
+      # STRICT=false -> игнорировать пробелы в конце строк + пустые строки в конце файла
+      STRICT: "false"
+
+    steps:
+      - name: clone repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: clone ref
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.REFERENCE_REPO }}
+          path: reference
+          fetch-depth: 1
+
+      - name: check structure + diff (diff в Summary)
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          # =====================================================
+          # СПИСОК 1 — обязательные файлы (ТОЛЬКО проверка наличия)
+          # =====================================================
+          FILES_REQUIRED=(
+            "index.html"
+            "styles/base.css"
+            "styles/base_adaptive.css"
+            "styles/index.css"
+            "styles/index_adaptive.css"
+            "fonts/Roboto-Bold.ttf"
+            "fonts/Roboto-Medium.ttf"
+            "fonts/Roboto-Regular.ttf"
+            "images/main-image.png"
+          )
+
+          # =====================================================
+          # СПИСОК 2 — файлы для сравнения содержимого (diff)
+          # =====================================================
+          FILES_COMPARE=(
+            "styles/base.css"
+            "styles/base_adaptive.css"
+            "styles/index.css"
+            "styles/index_adaptive.css"
+            "index.html"
+          )
+
+          mkdir -p .norm/ref .norm/student .diffs report
+
+          normalize_strict() {
+            local src="$1"
+            local dst="$2"
+            mkdir -p "$(dirname "$dst")"
+            awk '
+              NR==1 { sub(/^\xEF\xBB\xBF/, "") }
+              { sub(/\r$/, ""); print }
+            ' "$src" > "$dst"
+          }
+
+          normalize_tolerant() {
+            local src="$1"
+            local dst="$2"
+            mkdir -p "$(dirname "$dst")"
+            awk '
+              NR==1 { sub(/^\xEF\xBB\xBF/, "") }
+              {
+                sub(/\r$/, "");
+                sub(/[ \t]+$/, "");
+                lines[NR] = $0;
+                last = NR;
+              }
+              END {
+                while (last > 0 && lines[last] == "") last--;
+                for (i = 1; i <= last; i++) print lines[i];
+              }
+            ' "$src" > "$dst"
+          }
+
+          normalize() {
+            if [[ "${STRICT}" == "true" ]]; then
+              normalize_strict "$1" "$2"
+            else
+              normalize_tolerant "$1" "$2"
+            fi
+          }
+
+          failed=0
+
+          # =====================================================
+          # Итог проверки (ФАЙЛ: проблема)
+          # =====================================================
+          RESULT_LINES=()
+          add_result_line() {
+            local line="$1"
+            RESULT_LINES+=("$line")
+          }
+
+          render_result() {
+            {
+              echo
+              echo "## Итог проверки"
+              echo
+              if (( ${#RESULT_LINES[@]} == 0 )); then
+                echo "<p><strong>ОШИБОК НЕ НАЙДЕНО</strong></p>"
+              else
+                echo "<pre>"
+                printf '%s\n' "${RESULT_LINES[@]}"
+                echo "</pre>"
+              fi
+              echo
+            } >> "$GITHUB_STEP_SUMMARY"
+          }
+
+          # -------------------- SUMMARY HEADER --------------------
+          {
+            echo "# 🧪 чек-чек"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # =====================================================
+          # ШАГ 1 — ПРОВЕРКА НАЛИЧИЯ ФАЙЛОВ
+          # =====================================================
+          {
+            echo "## Файлы"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          for f in "${FILES_REQUIRED[@]}"; do
+            if [[ -f "$f" ]]; then
+              echo "- ✅ \`$f\` — найден" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "::error file=$f::Файл отсутствует"
+              echo "- ❌ \`$f\` — отсутствует" >> "$GITHUB_STEP_SUMMARY"
+              add_result_line "$f: файл отсутствует"
+              failed=1
+            fi
+          done
+
+          # =====================================================
+          # ШАГ 2 — Содержимое
+          # =====================================================
+          {
+            echo
+            echo "## Содержимое"
+            echo
+            echo "### Как читать diff"
+            echo "- строки с **\`-\`** — как должно быть в эталоне"
+            echo "- строки с **\`+\`** — как сделано"
+            echo
+            echo "## Результаты сравнения"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          for f in "${FILES_COMPARE[@]}"; do
+            # Если нет файла у ученика
+            if [[ ! -f "$f" ]]; then
+              echo "::error file=$f::Нельзя сравнить содержимое — файла нет"
+              echo "- ❌ \`$f\` — не сравнивался (файл отсутствует)" >> "$GITHUB_STEP_SUMMARY"
+              add_result_line "$f: файл отсутствует"
+              failed=1
+              continue
+            fi
+
+            # Если нет файла в эталоне — проблема эталона
+            if [[ ! -f "reference/$f" ]]; then
+              echo "::error file=reference/$f::Файл отсутствует в эталоне"
+              echo "- ❌ \`$f\` — не сравнивался (нет файла в эталоне)" >> "$GITHUB_STEP_SUMMARY"
+              add_result_line "$f: отсутствует в эталоне (проверьте REFERENCE_REPO)"
+              failed=1
+              continue
+            fi
+
+            normalize "reference/$f" ".norm/ref/$f"
+            normalize "$f" ".norm/student/$f"
+
+            diff_file=".diffs/${f//\//_}.diff"
+
+            if diff -u ".norm/ref/$f" ".norm/student/$f" > "$diff_file"; then
+              echo "- ✅ \`$f\` — совпадает" >> "$GITHUB_STEP_SUMMARY"
+              rm -f "$diff_file"
+            else
+              echo "::error file=$f::Код не совпадает с эталоном"
+              echo "- ❌ \`$f\` — есть отличия" >> "$GITHUB_STEP_SUMMARY"
+              failed=1
+
+              {
+                echo
+                echo "### Diff: \`$f\` (фрагмент)"
+                echo
+                echo "\`\`\`diff"
+                head -n 200 "$diff_file"
+                echo "\`\`\`"
+                if [[ $(wc -l < "$diff_file") -gt 200 ]]; then
+                  echo
+                  echo "_Показаны первые 200 строк. Полный HTML-отчёт — в артефакте **autocheck-report**._"
+                fi
+                echo
+              } >> "$GITHUB_STEP_SUMMARY"
+
+              # "места" отличий = количество hunks (@@ ... @@)
+              diff_count="$(grep -c '^@@' "$diff_file" || true)"
+              if [[ "$diff_count" -le 0 ]]; then diff_count=1; fi
+
+              add_result_line "$f: код не совпадает с эталоном (${diff_count} мест)"
+            fi
+          done
+
+          # =====================================================
+          # СБОРКА ОБЩЕГО DIFF ДЛЯ HTML
+          # =====================================================
+          diff_files=( .diffs/*.diff )
+          if (( ${#diff_files[@]} > 0 )); then
+            cat "${diff_files[@]}" > report/all.diff
+          else
+            : > report/all.diff
+          fi
+
+          echo "$failed" > report/failed.flag
+
+          # ✅ ВЫВОДИМ ИТОГ (важно: после всех проверок)
+          render_result
+
+          {
+            echo
+            echo "## Ниже в разделе артефактов (Artifacts) – полный отчет по чек-чеку"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: HTML-report (diff2html)
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! -s report/all.diff ]]; then
+            echo "<html><body style='font-family:system-ui;padding:24px'><h2>✅ Отличий по коду нет</h2><p>Все проверяемые файлы совпадают с эталоном.</p></body></html>" > report/report.html
+            exit 0
+          fi
+
+          npm i -g diff2html-cli
+          diff2html -i file -F report/report.html -- report/all.diff
+
+      - name: load HTML-report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: autocheck-report
+          path: report
+
+      - name: Fail if errors
+        shell: bash
+        run: |
+          set -euo pipefail
+          failed="$(cat report/failed.flag || echo 1)"
+          if [[ "$failed" != "0" ]]; then
+            echo "Обнаружены ошибки. Смотрите Summary и HTML-отчёт."
+            exit 1
+          fi
+          echo "Проверка пройдена успешно ✅"
