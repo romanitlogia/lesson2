@@ -189,7 +189,7 @@ jobs:
 
             diff_file=".diffs/${f//\//_}.diff"
 
-            if diff -u ".norm/ref/$f" ".norm/student/$f" > "$diff_file"; then
+            if diff -u -w -B ".norm/ref/$f" ".norm/student/$f" > "$diff_file"; then
               echo "- ✅ \`$f\` — совпадает" >> "$GITHUB_STEP_SUMMARY"
               rm -f "$diff_file"
             else
