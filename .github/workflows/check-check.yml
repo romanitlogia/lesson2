@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      REFERENCE_REPO: intensive-front/lesson2
+      REFERENCE_REPO: intensive-front/l2ref
       # STRICT=true  -> максимально строго (кроме CRLF и BOM)
       # STRICT=false -> игнорировать пробелы в конце строк + пустые строки в конце файла
       STRICT: "false"
